@@ -1,0 +1,383 @@
+/*
+ ================================================================================================
+ Name        : HMI_ECU.c
+ Author      : Mohamed Aboelezz
+ Description : Interface with the user to get his input and pass these input to Control_ECU throw UART
+ Date        : 26/10/2022
+ ================================================================================================
+ */
+
+#include "lcd.h"
+#include "keypad.h"
+#include "uart.h"
+#include "timer1.h"
+#include <avr/io.h>
+#include <util/delay.h>
+
+/*******************************************************************************
+ *                                Definitions                                  *
+ *******************************************************************************/
+#define DOOR_UNLOCKING_TIME  			15			/* to change door unlock time from here */
+#define DOOR_OPEN_TIME 		 			3			/* to change door open time from here */
+#define DOOR_LOCKING_TIME    			15			/* to change door lock time from here */
+#define ERROR_TIME			 			60			/* to change buzzer time from here */
+
+/*******************************************************************************
+ *                           Global Variables                                  *
+ *******************************************************************************/
+static uint8 volatile g_tick = 0;		/* to count Ticks */
+
+/*******************************************************************************
+ *                      Functions Prototypes                                   *
+ *******************************************************************************/
+
+/*
+ * Description :
+ * Functional responsible for receive the password from the user and send it to the second MC
+ * throw UART to store it at EEPROM.
+ */
+void step_one(void);
+
+/*
+ * Description :
+ * Functional responsible for displaying main options to the user and get the command send it to
+ * the other MC throw UART if then take the required action from the Control MC.
+ */
+void step_two(void);
+
+/* This is the call back function called by the Timer 1 driver.
+ * It is used to calculate the required time for each event.
+ */
+void Timer_callBack(void);
+
+int main(void)
+{
+	/* Enable Global Interrupt I-Bit */
+	SREG |= (1<<7);
+
+	/* Create configuration structure for UART driver */
+	UART_ConfigType UART_Config = {Eight_Bit,Disabled,One_Bit,9600};
+
+	/* Set the Call back function pointer in the Timer 1 driver */
+	Timer1_setCallBack(Timer_callBack);
+
+	LCD_init(); 						/* initialize LCD driver */
+	UART_init(&UART_Config);			/* initialize UART driver */
+	step_one();							/* go to step one to store the first password */
+	step_two();							/* go to step two to display options */
+	while(1)
+	{
+
+	}
+}
+
+/*
+ * Description :
+ * Functional responsible for receive the password from the user and send it to the second MC
+ * throw UART to store it at EEPROM.
+ */
+void step_one(void)
+{
+	uint8 key;			/* to get the pressed key */
+	uint8 str_1[7];		/* array to get the 1st pass */
+	uint8 str_2[7];		/* array to get the 2nd pass */
+	uint8 counter=0;
+	/* step one */
+	while(1)
+	{
+		LCD_clearScreen();
+		/* Display this string "plz enter pass: " on LCD at the First row col 0 */
+		LCD_displayStringRowColumn(0,0,"plz enter pass: ");
+		/* move the cursor to the second row col 0 */
+		LCD_moveCursor(1,0);
+		/* for enter pass */
+		for(counter=0;counter<6;)
+		{
+			/* get the pressed key value */
+			key=KEYPAD_getPressedKey();
+			if((key>=0)&&(key<=9)&&(counter!=5))
+			{
+				/* store the value at the array */
+				str_1[counter]=key;
+				/* display '*' every digit in pass */
+				LCD_displayCharacter('*');
+				counter++;
+			}
+			else if((key==13)&&(counter==5))
+			{
+				/* Put '#' to say to the other MC it was the last value in the string */
+				str_1[counter]='#';
+				/* put '\0' to finish string */
+				str_1[counter+1]='\0';
+				counter++;
+			}
+			/* delay to get the next key */
+			_delay_ms(500);
+		}
+		LCD_clearScreen();
+		/* Display this string "plz re-enter the" on LCD at the First row col 0 */
+		LCD_displayStringRowColumn(0,0,"plz re-enter the");
+		/* Display this string "same pass: " on LCD at the second row col 0 */
+		LCD_displayStringRowColumn(1,0,"same pass: ");
+		/* for re-enter pass */
+		for(counter=0;counter<6;)
+		{
+			/* get the pressed key value */
+			key=KEYPAD_getPressedKey();
+			if((key>=0)&&(key<=9)&&(counter!=5))
+			{
+				/* store the value at the array */
+				str_2[counter]=key;
+				/* display '*' every digit in pass */
+				LCD_displayCharacter('*');
+				counter++;
+			}
+			else if((key==13)&&(counter==5))
+			{
+				/* Put '#' to say to the other MC it was the last value in the string */
+				str_2[counter]='#';
+				/* put '\0' to finish string */
+				str_2[counter+1]='\0';
+				counter++;
+			}
+			/* delay to get the next key */
+			_delay_ms(500);
+		}
+		/* send to the other MC i'm ready to send data */
+		UART_sendByte(MC_READY);
+		/* send the first pass */
+		UART_sendString(str_1);
+		/* send the second pass*/
+		UART_sendString(str_2);
+		/* wait until other MC process the data sent and reply */
+		while(UART_recieveByte()!=MC_READY){}
+		/* if data accepted mean the two pass are same so break this step */
+		if(UART_recieveByte()==ACCEPTED)
+		{
+			break;
+		}
+	}
+}
+
+/*
+ * Description :
+ * Functional responsible for displaying main options to the user and get the command send it to
+ * the other MC throw UART if then take the required action from the Control MC.
+ */
+void step_two(void)
+{
+	uint8 key;			/* to get the pressed key */
+	uint8 str[7];		/* array to get the pass */
+	uint8 counter=0;
+
+	/* Create configuration structure for Timer 1 driver to give interrupt every 1 sec */
+	Timer1_ConfigType Timer1_Config = {0,15625,F_CPU_64,CTC};
+	/* step two */
+	while(1)
+	{
+		LCD_clearScreen();
+		/* Display this string "+ : Open Door" on LCD at the First row col 0 */
+		LCD_displayStringRowColumn(0,0,"+ : Open Door");
+		/* Display this string "- : Change Pass" on LCD at the second row col 0 */
+		LCD_displayStringRowColumn(1,0,"- : Change Pass");
+		do
+		{
+			/* get the pressed key value */
+			key=KEYPAD_getPressedKey();
+		}while(!((key=='+')||(key=='-')));
+		/* step three */
+		if(key=='+')
+		{
+			while(1)
+			{
+				LCD_clearScreen();
+				/* Display this string "plz enter pass: " on LCD at the First row col 0 */
+				LCD_displayStringRowColumn(0,0,"plz enter pass: ");
+				/* move the cursor to the second row col 0 */
+				LCD_moveCursor(1,0);
+				/* for enter pass */
+				for(counter=0;counter<6;)
+				{
+					/* get the pressed key value */
+					key=KEYPAD_getPressedKey();
+					if((key>=0)&&(key<=9)&&(counter!=5))
+					{
+						/* store the value at the array */
+						str[counter]=key;
+						/* display '*' every digit in pass */
+						LCD_displayCharacter('*');
+						counter++;
+					}
+					else if((key==13)&&(counter==5))
+					{
+						/* Put '#' to say to the other MC it was the last value in the string */
+						str[counter]='#';
+						/* put '\0' to finish string */
+						str[counter+1]='\0';
+						counter++;
+					}
+					/* delay to get the next key */
+					_delay_ms(500);
+				}
+				/* send to the other MC i'm ready to send data */
+				UART_sendByte(MC_READY);
+				/* send the pass */
+				UART_sendString(str);
+				/* send command */
+				UART_sendByte('+');
+				/* wait until other MC process the data sent and reply */
+				while(UART_recieveByte()!=MC_READY){}
+				/* if data accepted mean the password is true */
+				if(UART_recieveByte()==ACCEPTED)
+				{
+					LCD_clearScreen();
+					/* Display this string "Door is Unlocking" on LCD at the First row col 0 */
+					LCD_displayStringRowColumn(0,0,"Door is Unlocking");
+					/* start the timer */
+					Timer1_init(&Timer1_Config);
+					while(1)
+					{
+						if(g_tick==DOOR_UNLOCKING_TIME)
+						{
+							g_tick=0;
+							break;
+						}
+					}
+					LCD_clearScreen();
+					/* Display this string "Door is Open" on LCD at the First row col 0 */
+					LCD_displayStringRowColumn(0,0,"Door is Open");
+					while(1)
+					{
+						if(g_tick==DOOR_OPEN_TIME)
+						{
+							g_tick=0;
+							break;
+						}
+					}
+					LCD_clearScreen();
+					/* Display this string "Door is Locking" on LCD at the First row col 0 */
+					LCD_displayStringRowColumn(0,0,"Door is Locking");
+					while(1)
+					{
+						if(g_tick==DOOR_LOCKING_TIME)
+						{
+							g_tick=0;
+							break;
+						}
+					}
+					Timer1_deInit();		/* stop the timer */
+					break;
+				}
+				else
+				{
+					/* step five */
+					/* wait until other MC process the data sent and reply */
+					while(UART_recieveByte()!=MC_READY){}
+					/* if data accepted mean that reach the max allowed for wrong pass */
+					if(UART_recieveByte()==ERROR_DETCTED)
+					{
+						LCD_clearScreen();
+						/* Display this string "ERROR" on LCD at the First row col 0 */
+						LCD_displayStringRowColumn(0,0,"ERROR");
+						/* start the timer */
+						Timer1_init(&Timer1_Config);
+						while(1)
+						{
+							if(g_tick==ERROR_TIME)
+							{
+								g_tick=0;
+								break;
+							}
+						}
+						Timer1_deInit();		/* stop the timer */
+						break;
+					}
+				}
+			}
+		}
+		/* step four */
+		else if(key=='-')
+		{
+			while(1)
+			{
+				LCD_clearScreen();
+				/* Display this string "plz enter pass: " on LCD at the First row col 0 */
+				LCD_displayStringRowColumn(0,0,"plz enter pass: ");
+				/* move the cursor to the second row col 0 */
+				LCD_moveCursor(1,0);
+				/* for enter pass */
+				for(counter=0;counter<6;)
+				{
+					/* get the pressed key value */
+					key=KEYPAD_getPressedKey();
+					if((key>=0)&&(key<=9)&&(counter!=5))
+					{
+						/* store the value at the array */
+						str[counter]=key;
+						/* display '*' every digit in pass */
+						LCD_displayCharacter('*');
+						counter++;
+					}
+					else if((key==13)&&(counter==5))
+					{
+						/* Put '#' to say to the other MC it was the last value in the string */
+						str[counter]='#';
+						/* put '\0' to finish string */
+						str[counter+1]='\0';
+						counter++;
+					}
+					/* delay to get the next key */
+					_delay_ms(500);
+				}
+				/* send to the other MC i'm ready to send data */
+				UART_sendByte(MC_READY);
+				/* send the pass */
+				UART_sendString(str);
+				/* send command */
+				UART_sendByte('-');
+				/* wait until other MC process the data sent and reply */
+				while(UART_recieveByte()!=MC_READY){}
+				/* if data accepted mean the password is true */
+				if(UART_recieveByte()==ACCEPTED)
+				{
+					step_one();							/* go to step one to store the new pass */
+					break;
+				}
+				else
+				{
+					/* step five */
+					/* wait until other MC process the data sent and reply */
+					while(UART_recieveByte()!=MC_READY){}
+					/* if data accepted mean that reach the max allowed for wrong pass */
+					if(UART_recieveByte()==ERROR_DETCTED)
+					{
+						LCD_clearScreen();
+						/* Display this string "ERROR" on LCD at the First row col 0 */
+						LCD_displayStringRowColumn(0,0,"ERROR");
+						/* start the timer */
+						Timer1_init(&Timer1_Config);
+						while(1)
+						{
+							if(g_tick==ERROR_TIME)
+							{
+								g_tick=0;
+								break;
+							}
+						}
+						Timer1_deInit();		/* stop the timer */
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* This is the call back function called by the Timer 1 driver.
+ * It is used to calculate the required time for each event.
+ */
+void Timer_callBack(void)
+{
+	/* Increment ticks */
+	g_tick++;
+}
